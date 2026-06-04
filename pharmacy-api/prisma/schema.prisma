@@ -1,0 +1,413 @@
+// Pharmacy SaaS — Database structure per Architecture Decision Document v1.0 (BINDING).
+// Invariants that Prisma cannot express (append-only, sum-zero, RLS, qty >= 0)
+// live in prisma/sql/001_invariants.sql and are part of the migration.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Identity & Tenancy ─────────────────────────
+
+model Pharmacy {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  ownerName String?
+  phone     String?
+  createdAt DateTime @default(now())
+
+  users     User[]
+  @@map("pharmacies")
+}
+
+enum Role {
+  OWNER
+  PHARMACIST
+  ASSISTANT
+  CASHIER
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  pharmacyId   String   @db.Uuid
+  pharmacy     Pharmacy @relation(fields: [pharmacyId], references: [id])
+  name         String
+  phone        String
+  passwordHash String
+  pinHash      String? // pharmacist override PIN (Contract §2 pin-elevate)
+  role         Role
+  archivedAt   DateTime?
+  createdAt    DateTime @default(now())
+
+  @@unique([pharmacyId, phone])
+  @@index([pharmacyId])
+  @@map("users")
+}
+
+// ───────────────────────── Catalog (descriptive only — no quantities) ─────────────────────────
+
+model Medicine {
+  id                   String    @id @default(uuid()) @db.Uuid
+  pharmacyId           String    @db.Uuid
+  tradeName            String
+  tradeNameAr          String
+  scientificName       String
+  form                 String
+  company              String?
+  barcode              String?
+  internalCode         String
+  sellPrice            Decimal   @db.Decimal(19, 4)
+  isControlled         Boolean   @default(false)
+  requiresPrescription Boolean   @default(false)
+  minStockLevel        Int       @default(0)
+  archivedAt           DateTime?
+  createdAt            DateTime  @default(now())
+
+  batches Batch[]
+
+  @@unique([pharmacyId, internalCode])
+  @@index([pharmacyId, tradeNameAr])
+  @@index([pharmacyId, scientificName])
+  @@index([pharmacyId, barcode])
+  @@map("medicines")
+}
+
+// ───────────────────────── Inventory: Batches are the quantity truth ─────────────────────────
+
+enum BatchStatus {
+  ACTIVE
+  QUARANTINED
+  EXPIRED
+  DEPLETED
+}
+
+model Batch {
+  id            String      @id @default(uuid()) @db.Uuid
+  pharmacyId    String      @db.Uuid
+  medicineId    String      @db.Uuid
+  medicine      Medicine    @relation(fields: [medicineId], references: [id])
+  batchNumber   String
+  expiryDate    DateTime    @db.Date
+  quantityOnHand Int        // CHECK (quantity_on_hand >= 0) in 001_invariants.sql
+  unitCost      Decimal     @db.Decimal(19, 4)
+  status        BatchStatus @default(ACTIVE)
+  receivedAt    DateTime    @default(now())
+
+  @@index([pharmacyId, medicineId, status, expiryDate]) // FEFO scan path
+  @@map("batches")
+}
+
+enum InventoryTxnType {
+  SALE
+  RETURN_IN
+  GRN
+  ADJUSTMENT
+  WRITE_OFF
+}
+
+/// Append-only (UPDATE/DELETE blocked by trigger). The perpetual movement ledger.
+model InventoryTransaction {
+  id          String           @id @default(uuid()) @db.Uuid
+  pharmacyId  String           @db.Uuid
+  medicineId  String           @db.Uuid
+  batchId     String           @db.Uuid
+  type        InventoryTxnType
+  quantity    Int              // signed: negative = out, positive = in
+  unitCost    Decimal          @db.Decimal(19, 4)
+  referenceType String         // INVOICE | GRN | ADJUSTMENT | RETURN
+  referenceId String           @db.Uuid
+  actorUserId String           @db.Uuid
+  createdAt   DateTime         @default(now())
+
+  @@index([pharmacyId, medicineId, createdAt])
+  @@index([pharmacyId, batchId])
+  @@map("inventory_transactions")
+}
+
+model Grn {
+  id                String    @id @default(uuid()) @db.Uuid
+  pharmacyId        String    @db.Uuid
+  supplierId        String    @db.Uuid
+  supplierInvoiceNo String
+  paymentTerms      String // CASH | CREDIT
+  journalEntryId    String    @db.Uuid
+  receivedAt        DateTime
+  createdByUserId   String    @db.Uuid
+  createdAt         DateTime  @default(now())
+  lines             GrnLine[]
+
+  @@index([pharmacyId, supplierId])
+  @@map("grns")
+}
+
+model GrnLine {
+  id         String  @id @default(uuid()) @db.Uuid
+  grnId      String  @db.Uuid
+  grn        Grn     @relation(fields: [grnId], references: [id])
+  medicineId String  @db.Uuid
+  batchId    String  @db.Uuid
+  quantity   Int
+  bonusQty   Int     @default(0)
+  unitCost   Decimal @db.Decimal(19, 4)
+
+  @@map("grn_lines")
+}
+
+// ───────────────────────── Sales / POS ─────────────────────────
+
+enum PaymentMethod {
+  CASH
+  CARD
+  CREDIT
+  SPLIT
+}
+
+model SalesInvoice {
+  id             String        @id @default(uuid()) @db.Uuid
+  pharmacyId     String        @db.Uuid
+  invoiceNo      String
+  clientSaleId   String        @db.Uuid // offline replay key (Contract §5.3)
+  customerId     String?       @db.Uuid
+  cashierUserId  String        @db.Uuid
+  paymentMethod  PaymentMethod
+  subtotal       Decimal       @db.Decimal(19, 4)
+  totalDiscount  Decimal       @db.Decimal(19, 4)
+  total          Decimal       @db.Decimal(19, 4)
+  totalCost      Decimal       @db.Decimal(19, 4) // COGS at allocated batch cost
+  journalEntryId String        @db.Uuid
+  clientTimestamp DateTime
+  createdAt      DateTime      @default(now())
+  lines          SalesItem[]
+
+  @@unique([pharmacyId, clientSaleId])
+  @@unique([pharmacyId, invoiceNo])
+  @@index([pharmacyId, createdAt])
+  @@index([pharmacyId, customerId])
+  @@map("sales_invoices")
+}
+
+model SalesItem {
+  id          String       @id @default(uuid()) @db.Uuid
+  invoiceId   String       @db.Uuid
+  invoice     SalesInvoice @relation(fields: [invoiceId], references: [id])
+  medicineId  String       @db.Uuid
+  quantity    Int
+  unitPrice   Decimal      @db.Decimal(19, 4)
+  discount    Decimal      @db.Decimal(19, 4) @default(0)
+  lineTotal   Decimal      @db.Decimal(19, 4)
+  allocations BatchAllocation[]
+
+  @@map("sales_items")
+}
+
+/// Batch-mandatory rule: every sold unit is traceable to a lot (recall support).
+model BatchAllocation {
+  id         String    @id @default(uuid()) @db.Uuid
+  salesItemId String   @db.Uuid
+  salesItem  SalesItem @relation(fields: [salesItemId], references: [id])
+  batchId    String    @db.Uuid
+  quantity   Int
+  unitCost   Decimal   @db.Decimal(19, 4)
+
+  @@map("batch_allocations")
+}
+
+// ───────────────────────── Finance / Ledger (append-only) ─────────────────────────
+
+model Account {
+  id         String  @id @default(uuid()) @db.Uuid
+  pharmacyId String  @db.Uuid
+  code       String  // 1000 CASH, 1100 AR, 1200 INVENTORY, 2000 AP, 4000 SALES, 4100 SALES_DISCOUNT, 5000 COGS, 5100 WRITE_OFF, 5900 OVER_SHORT
+  name       String
+
+  @@unique([pharmacyId, code])
+  @@map("accounts")
+}
+
+/// Append-only; Σ(debit) = Σ(credit) enforced by deferred trigger in 001_invariants.sql.
+model JournalEntry {
+  id            String        @id @default(uuid()) @db.Uuid
+  pharmacyId    String        @db.Uuid
+  entryDate     DateTime      @default(now())
+  sourceType    String        // SALE | RETURN | GRN | PAYMENT_AR | PAYMENT_AP | ADJUSTMENT | MANUAL | REVERSAL
+  sourceId      String?       @db.Uuid
+  memo          String?
+  reversesEntryId String?     @db.Uuid // contra-entry linkage
+  createdByUserId String      @db.Uuid
+  createdAt     DateTime      @default(now())
+  lines         JournalLine[]
+
+  @@index([pharmacyId, entryDate])
+  @@index([pharmacyId, sourceType, sourceId])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id         String       @id @default(uuid()) @db.Uuid
+  entryId    String       @db.Uuid
+  entry      JournalEntry @relation(fields: [entryId], references: [id])
+  pharmacyId String       @db.Uuid
+  accountId  String       @db.Uuid
+  debit      Decimal      @db.Decimal(19, 4) @default(0)
+  credit     Decimal      @db.Decimal(19, 4) @default(0)
+  customerId String?      @db.Uuid // AR subledger dimension
+  supplierId String?      @db.Uuid // AP subledger dimension
+
+  @@index([pharmacyId, accountId])
+  @@index([pharmacyId, customerId])
+  @@index([pharmacyId, supplierId])
+  @@map("journal_lines")
+}
+
+model Installment {
+  id         String    @id @default(uuid()) @db.Uuid
+  pharmacyId String    @db.Uuid
+  customerId String    @db.Uuid
+  invoiceId  String    @db.Uuid
+  seq        Int
+  amount     Decimal   @db.Decimal(19, 4)
+  dueDate    DateTime  @db.Date
+  paidAt     DateTime?
+
+  @@index([pharmacyId, customerId, dueDate])
+  @@map("installments")
+}
+
+model ClosedPeriod {
+  id         String   @id @default(uuid()) @db.Uuid
+  pharmacyId String   @db.Uuid
+  yearMonth  String   // "2026-06"
+  closedAt   DateTime @default(now())
+  closedByUserId String @db.Uuid
+
+  @@unique([pharmacyId, yearMonth])
+  @@map("closed_periods")
+}
+
+// ───────────────────────── Customers / Suppliers ─────────────────────────
+
+model Customer {
+  id            String    @id @default(uuid()) @db.Uuid
+  pharmacyId    String    @db.Uuid
+  name          String
+  phone         String
+  creditLimit   Decimal   @db.Decimal(19, 4) @default(0)
+  // Projections (cached; source of truth = AR subledger; verified by reconciliation job)
+  balanceCached Decimal   @db.Decimal(19, 4) @default(0)
+  totalPurchases Decimal  @db.Decimal(19, 4) @default(0)
+  totalPaid     Decimal   @db.Decimal(19, 4) @default(0)
+  loyaltyPoints Int       @default(0)
+  lastVisit     DateTime?
+  allergies     String[]  @default([])
+  archivedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@unique([pharmacyId, phone])
+  @@index([pharmacyId, name])
+  @@map("customers")
+}
+
+model Supplier {
+  id           String    @id @default(uuid()) @db.Uuid
+  pharmacyId   String    @db.Uuid
+  name         String
+  phone        String?
+  balanceCached Decimal  @db.Decimal(19, 4) @default(0) // AP projection
+  archivedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([pharmacyId, name])
+  @@map("suppliers")
+}
+
+// ───────────────────────── Platform: outbox, idempotency, audit, alerts ─────────────────────────
+
+/// Transactional outbox — written in the SAME transaction as the business change (Architecture §2).
+model OutboxEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  pharmacyId  String    @db.Uuid
+  eventType   String    // SaleCompleted | StockReceived | LowStockDetected | PaymentRecorded | ...
+  payload     Json
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+  attempts    Int       @default(0)
+
+  @@index([processedAt, createdAt])
+  @@map("outbox_events")
+}
+
+model IdempotencyKey {
+  id         String   @id @default(uuid()) @db.Uuid
+  pharmacyId String   @db.Uuid
+  key        String   @db.Uuid
+  endpoint   String
+  status     String   @default("PENDING") // PENDING | DONE
+  response   Json?
+  createdAt  DateTime @default(now())
+
+  @@unique([pharmacyId, key])
+  @@map("idempotency_keys")
+}
+
+/// Append-only (trigger-protected).
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  pharmacyId String   @db.Uuid
+  actorUserId String  @db.Uuid
+  action     String
+  entityType String
+  entityId   String?
+  detail     Json?
+  createdAt  DateTime @default(now())
+
+  @@index([pharmacyId, createdAt])
+  @@map("audit_logs")
+}
+
+model Alert {
+  id         String    @id @default(uuid()) @db.Uuid
+  pharmacyId String    @db.Uuid
+  type       String    // LOW_STOCK | EXPIRY | DEBT_OVERDUE | RECONCILE | CREDIT_LIMIT
+  message    String
+  refId      String?   @db.Uuid
+  status     String    @default("UNREAD")
+  createdAt  DateTime  @default(now())
+
+  @@index([pharmacyId, status, createdAt])
+  @@map("alerts")
+}
+
+// ───────────────────────── Sales Returns (WF-3 / BR-3.3) ─────────────────────────
+
+/// Return facts — append-only, journal-linked (corrections of corrections = contra entries).
+model SaleReturn {
+  id              String           @id @default(uuid()) @db.Uuid
+  pharmacyId      String           @db.Uuid
+  invoiceId       String           @db.Uuid
+  reason          String
+  journalEntryId  String           @db.Uuid
+  createdByUserId String           @db.Uuid
+  createdAt       DateTime         @default(now())
+  lines           SaleReturnLine[]
+
+  @@index([pharmacyId, invoiceId])
+  @@map("sale_returns")
+}
+
+model SaleReturnLine {
+  id          String     @id @default(uuid()) @db.Uuid
+  pharmacyId  String     @db.Uuid
+  returnId    String     @db.Uuid
+  return      SaleReturn @relation(fields: [returnId], references: [id])
+  salesItemId String     @db.Uuid
+  quantity    Int
+  refund      Decimal    @db.Decimal(19, 4) // net money returned for this line
+  cost        Decimal    @db.Decimal(19, 4) // inventory value restored (original allocation cost)
+
+  @@index([pharmacyId, salesItemId])
+  @@map("sale_return_lines")
+}
