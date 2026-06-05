@@ -74,6 +74,7 @@ model Medicine {
   @@index([pharmacyId, scientificName])
   @@index([pharmacyId, barcode])
   @@map("medicines")
+  onlineOrderLines OnlineOrderLine[]
 }
 
 // ───────────────────────── Inventory: Batches are the quantity truth ─────────────────────────
@@ -303,6 +304,10 @@ model Customer {
   loyaltyPoints Int       @default(0)
   lastVisit     DateTime?
   allergies     String[]  @default([])
+  // Customer Portal (الستور): credentials + approval gate for existing-ledger phones
+  portalPasswordHash String?
+  portalStatus       String? // ACTIVE | PENDING
+  onlineOrders       OnlineOrder[]
   archivedAt    DateTime?
   createdAt     DateTime  @default(now())
 
@@ -410,4 +415,40 @@ model SaleReturnLine {
 
   @@index([pharmacyId, salesItemId])
   @@map("sale_return_lines")
+}
+
+// ───────────────────────── Customer Portal & Online Orders (الستور) ─────────────────────────
+
+model OnlineOrder {
+  id          String            @id @default(uuid()) @db.Uuid
+  pharmacyId  String            @db.Uuid
+  customerId  String            @db.Uuid
+  customer    Customer          @relation(fields: [customerId], references: [id])
+  status      String            @default("PENDING") // PENDING→ACCEPTED→PREPARING→READY→DELIVERED | CANCELLED
+  fulfillment String            @default("PICKUP") // PICKUP | DELIVERY
+  address     String?
+  note        String?
+  total       Decimal           @db.Decimal(19, 4) // price snapshot at order time; final truth = invoice
+  invoiceId   String?           @db.Uuid // set when delivered → converted to a real atomic sale
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  lines       OnlineOrderLine[]
+
+  @@index([pharmacyId, status, createdAt])
+  @@index([pharmacyId, customerId])
+  @@map("online_orders")
+}
+
+model OnlineOrderLine {
+  id         String      @id @default(uuid()) @db.Uuid
+  pharmacyId String      @db.Uuid
+  orderId    String      @db.Uuid
+  order      OnlineOrder @relation(fields: [orderId], references: [id])
+  medicineId String      @db.Uuid
+  medicine   Medicine    @relation(fields: [medicineId], references: [id])
+  nameAr     String // snapshot for history even if catalog changes
+  quantity   Int
+  unitPrice  Decimal     @db.Decimal(19, 4)
+
+  @@map("online_order_lines")
 }

@@ -1,5 +1,8 @@
 import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import { CreateGrnDto } from "./dto/grn.dto";
+import { DomainException } from "../common/errors";
+import { PrismaService, Tx } from "../common/prisma.service";
+import { AuditService } from "../platform/audit.service";
 import { AdjustDto } from "./dto/adjust.dto";
 import { InventoryService } from "./inventory.service";
 import { IdempotencyService } from "../common/idempotency.service";
@@ -15,6 +18,8 @@ export class InventoryController {
     private readonly inventory: InventoryService,
     private readonly idem: IdempotencyService,
     private readonly cache: CacheService,
+    private readonly audit: AuditService,
+    private readonly prisma: PrismaService,
   ) {}
 
   /** GET /stock — on-hand projection (Contract §4). */
@@ -58,5 +63,24 @@ export class InventoryController {
   @Roles("ASSISTANT", "PHARMACIST")
   async adjust(@CurrentActor() actor: Actor, @IdemKey() key: string, @Body() dto: AdjustDto) {
     return this.idem.run(actor.pharmacyId, key, "POST /inventory/adjustments", () => this.inventory.adjust(actor, dto));
+  }
+
+  /** POST /batches/:id/quarantine — حجر تشغيلة عن البيع (قرار صيدلي، مُدقَّق). كان زرها بلا مسار — أُصلح. */
+  @Post("batches/:id/quarantine")
+  @Roles("PHARMACIST")
+  async quarantine(@CurrentActor() actor: Actor, @Param("id") id: string, @Body() body: { reason?: string }) {
+    const batch = await this.prisma.batch.findFirst({ where: { id, pharmacyId: actor.pharmacyId } });
+    if (!batch) throw new DomainException("NOT_FOUND", "التشغيلة غير موجودة", 404);
+    return this.prisma.$transaction(async (tx: Tx) => {
+      const updated = await tx.batch.update({
+        where: { id },
+        data: { status: batch.status === "QUARANTINED" ? "ACTIVE" : "QUARANTINED" },
+      });
+      await this.audit.record(tx, actor, "BATCH_QUARANTINE_TOGGLED", "Batch", id, {
+        to: updated.status, reason: body.reason,
+      });
+      await this.cache.del(`stock:${actor.pharmacyId}`);
+      return updated;
+    });
   }
 }

@@ -11,6 +11,8 @@ export const EVENTS = {
   CreditLimitBreached: "CreditLimitBreached",
   AccountingPeriodClosed: "AccountingPeriodClosed",
   DURAlertRaised: "DURAlertRaised",
+  OrderPlaced: 'shop.order.placed',
+  OrderStatusChanged: 'shop.order.status_changed',
 } as const;
 export type EventType = (typeof EVENTS)[keyof typeof EVENTS];
 

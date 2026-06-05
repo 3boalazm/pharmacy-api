@@ -1,4 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import * as fs from "fs";
+import * as path from "path";
 import { IsBoolean, IsInt, IsNumberString, IsOptional, IsString, Min } from "class-validator";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../common/prisma.service";
@@ -120,5 +122,45 @@ export class MedicinesController {
       await this.audit.record(tx, actor, "MEDICINE_UPDATED", "Medicine", id, { ...dto });
       return med;
     });
+  }
+
+  /** POST /medicines/import-base — استيراد كتالوج الأدوية المجهز (1,951 صنفًا) من داخل النظام:
+   *  كتالوج فقط بكميات صفر وبدون صلاحية (المخزون الفعلي يدخل من GRN). Idempotent بالكامل. */
+  @Post("import-base")
+  @Roles()
+  async importBase(@CurrentActor() actor: Actor) {
+    const file = path.join(process.cwd(), "prisma", "data", "items.json");
+    if (!fs.existsSync(file)) throw new DomainException("NOT_FOUND", "ملف الأصناف غير موجود في الخادم", 404);
+    const items: { tradeNameAr: string; form: string; sellPrice: string }[] = JSON.parse(fs.readFileSync(file, "utf-8"));
+
+    const existing = await this.prisma.medicine.findMany({
+      where: { pharmacyId: actor.pharmacyId },
+      select: { tradeNameAr: true, form: true, internalCode: true },
+    });
+    const have = new Set(existing.map((m) => `${m.tradeNameAr}|${m.form}`));
+    let seq = existing.map((m) => Number(m.internalCode.replace(/\D/g, "")) || 0).reduce((a, b) => Math.max(a, b), 0);
+    const fresh = items.filter((i) => !have.has(`${i.tradeNameAr}|${i.form}`));
+
+    for (let i = 0; i < fresh.length; i += 500) {
+      await this.prisma.medicine.createMany({
+        data: fresh.slice(i, i + 500).map((it) => ({
+          pharmacyId: actor.pharmacyId,
+          tradeNameAr: it.tradeNameAr,
+          tradeName: it.tradeNameAr,
+          scientificName: "غير مسجل",
+          form: it.form,
+          internalCode: `MED-${String(++seq).padStart(6, "0")}`,
+          sellPrice: new Prisma.Decimal(it.sellPrice),
+          minStockLevel: 0,
+        })),
+        skipDuplicates: true,
+      });
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await this.audit.record(tx, actor, "CATALOG_IMPORTED", "Medicine", actor.pharmacyId, {
+        fileItems: items.length, inserted: fresh.length, skipped: items.length - fresh.length,
+      });
+    });
+    return { fileItems: items.length, inserted: fresh.length, alreadyExisted: items.length - fresh.length };
   }
 }

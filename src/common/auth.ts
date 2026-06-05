@@ -46,6 +46,7 @@ export class AuthGuard implements CanActivate {
     if (!token) throw new UnauthorizedException({ code: 'UNAUTHORIZED', message: 'Missing bearer token' });
     try {
       const payload = await this.jwt.verifyAsync<{ sub: string; pharmacyId: string; role: Role; scope?: 'override' }>(token);
+      if ((payload as { scope?: string }).scope === 'portal') throw new UnauthorizedException(); // customer tokens never reach staff routes
       req.actor = { userId: payload.sub, pharmacyId: payload.pharmacyId, role: payload.role, scope: payload.scope };
     } catch {
       throw new UnauthorizedException({ code: 'UNAUTHORIZED', message: 'Invalid or expired token' });

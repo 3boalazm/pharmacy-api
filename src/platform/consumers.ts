@@ -111,4 +111,16 @@ export class PlatformConsumers {
     });
     await this.cache.del(`stock:${event.pharmacyId}`);
   }
+
+  @OnEvent(EVENTS.OrderPlaced)
+  async onOrderPlaced(event: DomainEvent<{ orderId: string; total: string; fulfillment: string }>) {
+    await this.prisma.alert.create({
+      data: {
+        pharmacyId: event.pharmacyId,
+        type: "ORDER",
+        refId: event.payload.orderId,
+        message: `طلب أونلاين جديد بقيمة ${event.payload.total} ج.م (${event.payload.fulfillment === "DELIVERY" ? "توصيل" : "استلام من الصيدلية"})`,
+      },
+    });
+  }
 }
