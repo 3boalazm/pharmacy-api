@@ -2,12 +2,15 @@
   "name": "pharmacy-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Pharmacy SaaS \u2014 NestJS modular monolith (Architecture Decision Doc v1.0)",
+  "description": "Pharmacy SaaS — NestJS modular monolith",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run prisma:generate && tsc -p tsconfig.json",
+    "start": "node dist/main.js",
     "start:dev": "ts-node src/main.ts",
+
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate deploy && psql $DATABASE_URL -f prisma/sql/001_invariants.sql",
+    "prisma:migrate": "prisma migrate deploy",
+
     "seed": "ts-node prisma/seed.ts",
     "import:items": "ts-node prisma/import-items.ts"
   },
