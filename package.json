@@ -5,7 +5,7 @@
   "description": "Pharmacy SaaS — NestJS modular monolith",
 
   "scripts": {
-    "build": "npm run prisma:generate && nest build",
+    "build": "prisma generate && nest build",
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
 
