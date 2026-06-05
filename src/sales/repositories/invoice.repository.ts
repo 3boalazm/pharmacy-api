@@ -15,7 +15,7 @@ export class InvoiceRepository {
   async findWithLines(pharmacyId: string, id: string) {
     return this.prisma.salesInvoice.findFirst({
       where: { id, pharmacyId },
-      include: { lines: { include: { allocations: true } } },
+      include: { lines: { include: { allocations: true, medicine: { select: { tradeNameAr: true, form: true } } } } },
     });
   }
 
@@ -34,5 +34,16 @@ export class InvoiceRepository {
       _sum: { quantity: true },
     });
     return agg._sum.quantity ?? 0;
+  }
+
+  /** الكميات المرتجعة سابقًا لكل سطر في الفاتورة (لواجهة المرتجعات). */
+  async returnedByItem(pharmacyId: string, salesItemIds: string[]): Promise<Record<string, number>> {
+    if (salesItemIds.length === 0) return {};
+    const rows = await this.prisma.saleReturnLine.groupBy({
+      by: ["salesItemId"],
+      where: { pharmacyId, salesItemId: { in: salesItemIds } },
+      _sum: { quantity: true },
+    });
+    return Object.fromEntries(rows.map((r) => [r.salesItemId, r._sum.quantity ?? 0]));
   }
 }

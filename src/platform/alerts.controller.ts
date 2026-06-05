@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Param, Query } from "@nestjs/common";
 import { PrismaService } from "../common/prisma.service";
-import { Actor, CurrentActor, Roles } from "../common/auth";
+import { Actor, CurrentActor, Public, Roles } from "../common/auth";
 
 @Controller("alerts")
 export class AlertsController {
@@ -44,5 +44,16 @@ export class AuditLogsController {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
+  }
+}
+
+
+@Controller("health")
+export class HealthController {
+  /** GET /health — عام وخفيف: يستخدمه ping خارجي (كل 10 دقائق) لمنع نوم الاستضافة المجانية. */
+  @Public()
+  @Get()
+  ping() {
+    return { ok: true, ts: new Date().toISOString() };
   }
 }

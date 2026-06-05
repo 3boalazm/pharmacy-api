@@ -55,6 +55,13 @@ export class SalesController {
   @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
   async detail(@CurrentActor() actor: Actor, @Param("id") id: string) {
     const invoice = await this.invoices.findWithLines(actor.pharmacyId, id);
+    if (invoice) {
+      const returned = await this.invoices.returnedByItem(actor.pharmacyId, invoice.lines.map((l) => l.id));
+      return {
+        ...invoice,
+        lines: invoice.lines.map((l) => ({ ...l, nameAr: l.medicine.tradeNameAr, form: l.medicine.form, returnedQty: returned[l.id] ?? 0 })),
+      };
+    }
     if (!invoice) throw new DomainException("NOT_FOUND", "Invoice not found", 404);
     return invoice;
   }

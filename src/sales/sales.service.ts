@@ -23,6 +23,7 @@ export interface CreateSaleInput {
   prescriptionId: string | null;
   lines: { medicineId: string; quantity: number; unitPrice: string; discount?: { type: 'PERCENT' | 'AMOUNT'; value: string } }[];
   invoiceDiscount?: { type: 'PERCENT' | 'AMOUNT'; value: string };
+  loyaltyRedeem?: { points: number }; // قيمة النقطة 0.10 ج.م — تُخصم كخصم فاتورة وتُسحب من رصيد العميل في نفس المعاملة
   payment: { method: 'CASH' | 'CARD' | 'CREDIT' };
   durOverride?: { alertIds: string[]; overrideToken: string };
 }
@@ -95,6 +96,23 @@ export class SalesService {
         const extra =
           input.invoiceDiscount.type === 'PERCENT' ? base.mul(d(input.invoiceDiscount.value)).div(100) : d(input.invoiceDiscount.value);
         totalDiscount = totalDiscount.add(extra);
+      }
+      // استبدال نقاط الولاء (1 نقطة = 0.10 ج.م) — تحقق من الرصيد، خصم كقيمة، سحب النقاط لاحقًا في نفس المعاملة
+      let redeemedPoints = 0;
+      if (input.loyaltyRedeem && input.loyaltyRedeem.points > 0) {
+        if (!input.customerId) throw new DomainException('VALIDATION_ERROR', 'استبدال النقاط يتطلب عميلًا محددًا', 422);
+        const cust = await tx.customer.findFirst({ where: { id: input.customerId, pharmacyId: actor.pharmacyId } });
+        if (!cust) throw new DomainException('NOT_FOUND', 'العميل غير موجود', 404);
+        if (input.loyaltyRedeem.points > cust.loyaltyPoints) {
+          throw new DomainException('VALIDATION_ERROR', `رصيد النقاط ${cust.loyaltyPoints} لا يكفي`, 422, [{ available: cust.loyaltyPoints }]);
+        }
+        const redeemValue = d(input.loyaltyRedeem.points).mul('0.1').toDecimalPlaces(4);
+        const remaining = subtotal.sub(totalDiscount);
+        if (redeemValue.gte(remaining)) {
+          throw new DomainException('VALIDATION_ERROR', 'قيمة النقاط تتجاوز قيمة الفاتورة', 422);
+        }
+        totalDiscount = totalDiscount.add(redeemValue);
+        redeemedPoints = input.loyaltyRedeem.points;
       }
       const total = subtotal.sub(totalDiscount);
       if (total.lt(0)) throw new DomainException('VALIDATION_ERROR', 'Total cannot be negative', 422);
@@ -214,6 +232,16 @@ export class SalesService {
       }
 
       // ── 8. Audit + SaleCompleted (async reactions: loyalty, projections, alerts) ──
+      if (redeemedPoints > 0) {
+        await tx.customer.update({
+          where: { id: input.customerId! },
+          data: { loyaltyPoints: { decrement: redeemedPoints } },
+        });
+        await this.audit.record(tx, actor, 'LOYALTY_REDEEMED', 'Customer', input.customerId!, {
+          points: redeemedPoints, value: d(redeemedPoints).mul('0.1').toFixed(4), invoiceId: invoice.id,
+        });
+      }
+
       await this.audit.record(tx, actor, 'SALE_COMPLETED', 'SalesInvoice', invoice.id, {
         invoiceNo,
         total: total.toFixed(4),

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { IsArray, IsBoolean, IsNumberString, IsOptional, IsString } from "class-validator";
 import { Prisma } from "@prisma/client";
+import * as bcrypt from "bcryptjs";
 import { PrismaService } from "../common/prisma.service";
 import { Actor, CurrentActor, Roles } from "../common/auth";
 import { DomainException } from "../common/errors";
@@ -21,6 +22,8 @@ class UpdateCustomerDto {
   @IsOptional() @IsNumberString() creditLimit?: string;
   @IsOptional() @IsArray() allergies?: string[];
   @IsOptional() @IsBoolean() archived?: boolean;
+  @IsOptional() @IsBoolean() portalApproved?: boolean; // تفعيل دخول الستور لرقم له دفتر قائم
+  @IsOptional() @IsString() portalPassword?: string;    // إعادة تعيين كلمة مرور الستور (للعميل الناسي)
 }
 
 @Controller("customers")
@@ -57,7 +60,7 @@ export class CustomersController {
   async detail(@CurrentActor() actor: Actor, @Param("id") id: string) {
     const c = await this.prisma.customer.findFirst({ where: { id, pharmacyId: actor.pharmacyId } });
     if (!c) throw new DomainException("NOT_FOUND", "Customer not found", 404);
-    const { balanceCached, ...rest } = c;
+    const { balanceCached, portalPasswordHash: _h2, ...rest } = c;
     return { ...rest, balance: balanceCached };
   }
 
@@ -86,17 +89,20 @@ export class CustomersController {
     const existing = await this.prisma.customer.findFirst({ where: { id, pharmacyId: actor.pharmacyId } });
     if (!existing) throw new DomainException("NOT_FOUND", "Customer not found", 404);
     return this.prisma.$transaction(async (tx) => {
-      const { archived, creditLimit, ...fields } = dto;
+      const { archived, creditLimit, portalApproved, portalPassword, ...fields } = dto;
       const customer = await tx.customer.update({
         where: { id },
         data: {
           ...fields,
           ...(creditLimit !== undefined && { creditLimit: new Prisma.Decimal(creditLimit) }),
           ...(archived !== undefined && { archivedAt: archived ? new Date() : null }),
+          ...(portalPassword && { portalPasswordHash: await bcrypt.hash(portalPassword, 10), portalStatus: "ACTIVE" }),
+          ...(portalApproved !== undefined && { portalStatus: portalApproved ? "ACTIVE" : "PENDING" }),
         },
       });
-      await this.audit.record(tx, actor, "CUSTOMER_UPDATED", "Customer", id, { ...dto });
-      const { balanceCached, ...rest } = customer;
+      const { portalPassword: _pw, ...auditable } = dto;
+      await this.audit.record(tx, actor, "CUSTOMER_UPDATED", "Customer", id, { ...auditable, portalPasswordReset: !!dto.portalPassword });
+      const { balanceCached, portalPasswordHash: _h1, ...rest } = customer;
       return { ...rest, balance: balanceCached };
     });
   }

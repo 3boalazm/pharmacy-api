@@ -46,6 +46,7 @@ model User {
   @@unique([pharmacyId, phone])
   @@index([pharmacyId])
   @@map("users")
+  shifts Shift[]
 }
 
 // ───────────────────────── Catalog (descriptive only — no quantities) ─────────────────────────
@@ -75,6 +76,7 @@ model Medicine {
   @@index([pharmacyId, barcode])
   @@map("medicines")
   onlineOrderLines OnlineOrderLine[]
+  salesItems SalesItem[]
 }
 
 // ───────────────────────── Inventory: Batches are the quantity truth ─────────────────────────
@@ -196,6 +198,7 @@ model SalesItem {
   invoiceId   String       @db.Uuid
   invoice     SalesInvoice @relation(fields: [invoiceId], references: [id])
   medicineId  String       @db.Uuid
+  medicine    Medicine     @relation(fields: [medicineId], references: [id])
   quantity    Int
   unitPrice   Decimal      @db.Decimal(19, 4)
   discount    Decimal      @db.Decimal(19, 4) @default(0)
@@ -451,4 +454,26 @@ model OnlineOrderLine {
   unitPrice  Decimal     @db.Decimal(19, 4)
 
   @@map("online_order_lines")
+}
+
+// ───────────────────────── Shifts & Cash Drawer (WF-5) ─────────────────────────
+
+/// وردية الكاشير: رصيد افتتاحي ⟶ جرد إقفال ⟶ العجز/الزيادة قيد تلقائي على 5900.
+model Shift {
+  id             String    @id @default(uuid()) @db.Uuid
+  pharmacyId     String    @db.Uuid
+  userId         String    @db.Uuid
+  user           User      @relation(fields: [userId], references: [id])
+  status         String    @default("OPEN") // OPEN | CLOSED
+  openedAt       DateTime  @default(now())
+  closedAt       DateTime?
+  openingFloat   Decimal   @db.Decimal(19, 4)
+  expectedCash   Decimal?  @db.Decimal(19, 4)
+  countedCash    Decimal?  @db.Decimal(19, 4)
+  overShort      Decimal?  @db.Decimal(19, 4) // counted − expected (سالب = عجز)
+  journalEntryId String?   @db.Uuid
+
+  @@index([pharmacyId, status])
+  @@index([pharmacyId, userId, openedAt])
+  @@map("shifts")
 }

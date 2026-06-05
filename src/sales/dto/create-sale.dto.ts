@@ -19,6 +19,10 @@ export class PaymentDto {
   @IsIn(["CASH", "CARD", "CREDIT"]) method!: "CASH" | "CARD" | "CREDIT";
 }
 
+export class LoyaltyRedeemDto {
+  @IsInt() @Min(1) points!: number;
+}
+
 export class DurOverrideDto {
   @IsArray() alertIds!: string[];
   @IsString() overrideToken!: string;
@@ -33,4 +37,5 @@ export class CreateSaleDto {
   @IsOptional() @ValidateNested() @Type(() => DiscountDto) invoiceDiscount?: DiscountDto;
   @IsObject() @ValidateNested() @Type(() => PaymentDto) payment!: PaymentDto;
   @IsOptional() @ValidateNested() @Type(() => DurOverrideDto) durOverride?: DurOverrideDto;
+  @IsOptional() @ValidateNested() @Type(() => LoyaltyRedeemDto) loyaltyRedeem?: LoyaltyRedeemDto;
 }
