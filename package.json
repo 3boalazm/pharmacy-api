@@ -5,7 +5,7 @@
   "description": "Pharmacy SaaS — NestJS modular monolith",
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json",
-    "start": "node dist/main.js",
+    "start": "node dist/src/main.js",
     "start:dev": "ts-node src/main.ts",
     "db:push": "prisma db push",
     "prisma:generate": "prisma generate",
