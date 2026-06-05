@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 import { AuthController } from "./auth.controller";
+import { UsersController } from "./users.controller";
 
 /** Identity & Tenancy bounded context (Architecture §3). Exports JwtModule for guards/override checks. */
 @Module({
@@ -11,7 +12,7 @@ import { AuthController } from "./auth.controller";
       signOptions: { expiresIn: "8h" },
     }),
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, UsersController],
   exports: [JwtModule],
 })
 export class IdentityModule {}

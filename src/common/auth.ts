@@ -52,7 +52,8 @@ export class AuthGuard implements CanActivate {
     }
 
     const roles = this.reflector.getAllAndOverride<Role[] | undefined>(ROLES_KEY, [ctx.getHandler(), ctx.getClass()]);
-    if (roles && roles.length > 0) {
+    if (roles) {
+      // Declared restriction: OWNER always passes; empty list means OWNER-only.
       const role = req.actor!.role;
       if (role !== 'OWNER' && !roles.includes(role)) {
         throw new ForbiddenException({ code: 'FORBIDDEN', message: 'Insufficient role' });
