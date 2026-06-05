@@ -8,6 +8,7 @@ import { JournalRepository } from './repositories/journal.repository';
 /** Seeded chart of accounts (Architecture §6.2 / Contract §6). */
 export const ACCOUNTS = {
   CASH: '1000',
+  BANK: '1010',
   AR: '1100',
   INVENTORY: '1200',
   AP: '2000',
@@ -16,6 +17,8 @@ export const ACCOUNTS = {
   COGS: '5000',
   WRITE_OFF: '5100',
   OVER_SHORT: '5900',
+  OP_EXPENSE: '5800',
+  OTHER_INCOME: '4900',
 } as const;
 
 export type AccountCode = (typeof ACCOUNTS)[keyof typeof ACCOUNTS];
@@ -128,9 +131,21 @@ export class LedgerService {
   }
 
   /** كشف حساب العميل — running-balance fold over AR lines (Contract §6). */
-  async customerStatement(pharmacyId: string, customerId: string) {
+  async customerStatement(pharmacyId: string, customerId: string, range?: { from?: Date; to?: Date }) {
     const lines = await this.journal.subledgerLines(pharmacyId, { customerId });
-    return this.foldStatement(lines, { debitMeans: 'بيع آجل', creditMeans: 'سداد', normalSide: 'debit' });
+    const full = this.foldStatement(lines, { debitMeans: 'بيع آجل', creditMeans: 'سداد', normalSide: 'debit' });
+    if (!range?.from && !range?.to) return full;
+    // الفترة لا تغيّر الحقيقة: الافتتاحي = آخر رصيد جارٍ قبل بداية الفترة (الفولد كاملًا يظل المصدر)
+    const fromT = range.from?.getTime() ?? -Infinity;
+    const toT = range.to?.getTime() ?? Infinity;
+    let opening: Prisma.Decimal = new Prisma.Decimal(0);
+    const rows = [] as typeof full.rows;
+    for (const r of full.rows) {
+      const t = new Date(r.date).getTime();
+      if (t < fromT) opening = r.runningBalance;
+      else if (t <= toT) rows.push(r);
+    }
+    return { rows, openingBalance: opening, closingBalance: rows.length ? rows[rows.length - 1].runningBalance : opening };
   }
 
   /** كشف حساب المورد — running-balance fold over AP lines (credit-normal). */

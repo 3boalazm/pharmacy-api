@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import { RecordPaymentDto, ReverseDto, SupplierPaymentDto } from "./dto/payment.dto";
 import { JournalRepository } from "./repositories/journal.repository";
 import { Prisma } from "@prisma/client";
@@ -85,7 +85,12 @@ export class FinanceController {
       include: { lines: true },
     });
     if (!e) throw new DomainException("NOT_FOUND", "Entry not found", 404);
-    return e;
+    const accounts = await this.prisma.account.findMany({
+      where: { id: { in: e.lines.map((l) => l.accountId) } },
+      select: { id: true, code: true, name: true },
+    });
+    const byId = new Map(accounts.map((a) => [a.id, a]));
+    return { ...e, lines: e.lines.map((l) => ({ ...l, account: byId.get(l.accountId) ?? null })) };
   }
 
   /** POST /finance/journal/:id/reverse — contra entry, the only correction path. */
@@ -166,5 +171,103 @@ export class FinanceController {
         return { paymentId: entryId, supplierBalanceAfter: balanceAfter };
       }),
     );
+  }
+
+  /** GET /finance/installments — الشاشة المجمعة: متأخر / مستحق اليوم / قادم 7 أيام (ISS-015). */
+  @Get("installments")
+  @Roles("ASSISTANT", "PHARMACIST")
+  async installmentsOverview(@CurrentActor() actor: Actor, @Query("bucket") bucket = "overdue") {
+    const now = new Date();
+    const startToday = new Date(now.toDateString());
+    const endToday = new Date(startToday.getTime() + 86_400_000 - 1);
+    const in7 = new Date(startToday.getTime() + 7 * 86_400_000);
+    const range =
+      bucket === "today" ? { gte: startToday, lte: endToday }
+      : bucket === "upcoming" ? { gt: endToday, lte: in7 }
+      : { lt: startToday }; // overdue
+    const plain = await this.prisma.installment.findMany({
+      where: { pharmacyId: actor.pharmacyId, paidAt: null, dueDate: range },
+      orderBy: { dueDate: "asc" },
+      take: 200,
+    });
+    const customers = await this.prisma.customer.findMany({
+      where: { id: { in: [...new Set(plain.map((i) => i.customerId))] } },
+      select: { id: true, name: true, phone: true, balanceCached: true },
+    });
+    const byId = new Map(customers.map((c) => [c.id, c]));
+    const rows = plain.map((i) => ({ ...i, customer: byId.get(i.customerId) ?? null }));
+    const totals = await this.prisma.installment.aggregate({
+      where: { pharmacyId: actor.pharmacyId, paidAt: null, dueDate: range },
+      _sum: { amount: true }, _count: true,
+    });
+    return { rows, total: totals._sum.amount ?? new Prisma.Decimal(0), count: totals._count };
+  }
+
+  /** GET /finance/cash-flow — حركة النقدية اليومية من دفتر حساب 1000 + مطابقة فروق الورديات (ISS-013). */
+  @Get("cash-flow")
+  @Roles("PHARMACIST")
+  async cashFlow(@CurrentActor() actor: Actor, @Query("from") from?: string, @Query("to") to?: string) {
+    const end = to ? new Date(`${to}T23:59:59.999`) : new Date();
+    const start = from ? new Date(`${from}T00:00:00`) : new Date(end.getTime() - 29 * 86_400_000);
+    const opening = await this.prisma.$queryRaw<{ bal: Prisma.Decimal }[]>`
+      SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::numeric(19,4) AS bal
+      FROM journal_lines jl JOIN accounts a ON a.id = jl."accountId" JOIN journal_entries je ON je.id = jl."entryId"
+      WHERE jl."pharmacyId" = ${actor.pharmacyId}::uuid AND a.code = '1000' AND je."createdAt" < ${start}`;
+    const days = await this.prisma.$queryRaw<{ day: Date; inflow: Prisma.Decimal; outflow: Prisma.Decimal; overshort: Prisma.Decimal }[]>`
+      SELECT date_trunc('day', je."createdAt")::date AS day,
+             COALESCE(SUM(jl.debit), 0)::numeric(19,4)  AS inflow,
+             COALESCE(SUM(jl.credit), 0)::numeric(19,4) AS outflow,
+             COALESCE(SUM(CASE WHEN je."sourceType" = 'SHIFT_CLOSE' THEN jl.debit - jl.credit ELSE 0 END), 0)::numeric(19,4) AS overshort
+      FROM journal_lines jl JOIN accounts a ON a.id = jl."accountId" JOIN journal_entries je ON je.id = jl."entryId"
+      WHERE jl."pharmacyId" = ${actor.pharmacyId}::uuid AND a.code = '1000' AND je."createdAt" BETWEEN ${start} AND ${end}
+      GROUP BY 1 ORDER BY 1 DESC`;
+    return { from: start, to: end, opening: opening[0]?.bal ?? new Prisma.Decimal(0), days };
+  }
+
+  /** GET /finance/ar/aging — أعمار ديون العملاء: حالي/1-30/31-60/61-90/+90 من الأقساط المعلقة، و«غير مجدول» للباقي. */
+  @Get("ar/aging")
+  @Roles("PHARMACIST")
+  async arAging(@CurrentActor() actor: Actor) {
+    const customers = await this.prisma.customer.findMany({
+      where: { pharmacyId: actor.pharmacyId, archivedAt: null, balanceCached: { gt: 0 } },
+      select: { id: true, name: true, phone: true, balanceCached: true },
+      orderBy: { balanceCached: "desc" },
+    });
+    if (customers.length === 0) return { rows: [], totals: null };
+    const pending = await this.prisma.installment.findMany({
+      where: { pharmacyId: actor.pharmacyId, paidAt: null, customerId: { in: customers.map((c) => c.id) } },
+      select: { customerId: true, amount: true, dueDate: true },
+    });
+    const now = Date.now();
+    const zero = new Prisma.Decimal(0);
+    const bucketOf = (due: Date) => {
+      const days = Math.floor((now - due.getTime()) / 86_400_000);
+      if (days <= 0) return "current";
+      if (days <= 30) return "d30";
+      if (days <= 60) return "d60";
+      if (days <= 90) return "d90";
+      return "d90p";
+    };
+    const rows = customers.map((c) => {
+      const buckets: Record<"current" | "d30" | "d60" | "d90" | "d90p", Prisma.Decimal> = {
+        current: zero, d30: zero, d60: zero, d90: zero, d90p: zero,
+      };
+      let scheduled = zero;
+      for (const i of pending.filter((p) => p.customerId === c.id)) {
+        const b = bucketOf(i.dueDate);
+        buckets[b] = buckets[b].add(i.amount);
+        scheduled = scheduled.add(i.amount);
+      }
+      const unscheduled = new Prisma.Decimal(c.balanceCached).sub(scheduled);
+      return {
+        customerId: c.id, name: c.name, phone: c.phone, balance: c.balanceCached,
+        ...buckets, unscheduled: unscheduled.gt(0) ? unscheduled : zero,
+      };
+    });
+    const keys = ["balance", "current", "d30", "d60", "d90", "d90p", "unscheduled"] as const;
+    const totals = Object.fromEntries(
+      keys.map((k) => [k, rows.reduce((a, r) => a.add(r[k]), zero)]),
+    );
+    return { rows, totals };
   }
 }

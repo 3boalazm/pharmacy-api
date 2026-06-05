@@ -15,8 +15,14 @@ export class SaleLineDto {
   @IsOptional() @ValidateNested() @Type(() => DiscountDto) discount?: DiscountDto;
 }
 
-export class PaymentDto {
+export class PaymentSplitDto {
   @IsIn(["CASH", "CARD", "CREDIT"]) method!: "CASH" | "CARD" | "CREDIT";
+  @IsNumberString() amount!: string;
+}
+
+export class PaymentDto {
+  @IsIn(["CASH", "CARD", "CREDIT", "SPLIT"]) method!: "CASH" | "CARD" | "CREDIT" | "SPLIT";
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PaymentSplitDto) splits?: PaymentSplitDto[];
 }
 
 export class LoyaltyRedeemDto {

@@ -24,7 +24,7 @@ export interface CreateSaleInput {
   lines: { medicineId: string; quantity: number; unitPrice: string; discount?: { type: 'PERCENT' | 'AMOUNT'; value: string } }[];
   invoiceDiscount?: { type: 'PERCENT' | 'AMOUNT'; value: string };
   loyaltyRedeem?: { points: number }; // قيمة النقطة 0.10 ج.م — تُخصم كخصم فاتورة وتُسحب من رصيد العميل في نفس المعاملة
-  payment: { method: 'CASH' | 'CARD' | 'CREDIT' };
+  payment: { method: 'CASH' | 'CARD' | 'CREDIT' | 'SPLIT'; splits?: { method: 'CASH' | 'CARD' | 'CREDIT'; amount: string }[] };
   durOverride?: { alertIds: string[]; overrideToken: string };
 }
 
@@ -60,6 +60,21 @@ export class SalesService {
     return this.prisma.$transaction(async (tx) => {
       // ── 1. DUR clinical gate (pharmacist-only override, audited) ──
       const alerts = await this.dur.check(tx, actor.pharmacyId, input.customerId, input.lines.map((l) => l.medicineId));
+
+      // ── 1.5 بوابة الروشتة: أصناف موسومة «تتطلب روشتة» لا تُصرف بلا روشتة أو موافقة صيدلي موثقة ──
+      let rxOverridden = false;
+      const rxItems = await tx.medicine.findMany({
+        where: { id: { in: input.lines.map((l) => l.medicineId) }, pharmacyId: actor.pharmacyId, requiresPrescription: true },
+        select: { id: true, tradeNameAr: true },
+      });
+      if (rxItems.length > 0 && !input.prescriptionId) {
+        rxOverridden = await this.verifyOverride(input.durOverride);
+        if (!rxOverridden) {
+          throw new DomainException('RX_REQUIRED', 'أصناف تتطلب روشتة أو موافقة الصيدلي', 409, [
+            { items: rxItems.map((m) => m.tradeNameAr) },
+          ]);
+        }
+      }
       const blocking = alerts.filter((a) => a.severity !== 'INFO');
       if (blocking.length > 0) {
         const overridden = await this.verifyOverride(input.durOverride);
@@ -126,22 +141,43 @@ export class SalesService {
         });
         if (!customer) throw new DomainException('NOT_FOUND', 'Customer not found', 404);
       }
-      if (input.payment.method === 'CREDIT' && customer) {
+      // ── 2.9 تطبيع الدفع: المفرد = Split واحد؛ المجزأ يُتحقق من مجموعه ضد إجمالي الخادم ──
+      const splits: { method: 'CASH' | 'CARD' | 'CREDIT'; amount: Prisma.Decimal }[] =
+        input.payment.method === 'SPLIT'
+          ? (input.payment.splits ?? []).map((sp) => ({ method: sp.method, amount: new Prisma.Decimal(sp.amount) }))
+          : [{ method: input.payment.method, amount: total }];
+      if (input.payment.method === 'SPLIT') {
+        if (splits.length < 2) throw new DomainException('VALIDATION_ERROR', 'الدفع المجزأ يتطلب طريقتين على الأقل', 422);
+        if (splits.some((sp) => sp.amount.lte(0))) throw new DomainException('VALIDATION_ERROR', 'كل جزء يجب أن يكون موجبًا', 422);
+        const sum = splits.reduce((a, sp) => a.add(sp.amount), new Prisma.Decimal(0));
+        if (!sum.equals(total)) {
+          throw new DomainException('VALIDATION_ERROR', 'مجموع الأجزاء لا يساوي إجمالي الفاتورة', 422, [
+            { splitsSum: sum.toFixed(4), serverTotal: total.toFixed(4) },
+          ]);
+        }
+      }
+      const creditPortion = splits.filter((sp) => sp.method === 'CREDIT').reduce((a, sp) => a.add(sp.amount), new Prisma.Decimal(0));
+      const cashLikePortion = total.sub(creditPortion); // CASH + CARD → حساب النقدية 1000
+      if (creditPortion.gt(0) && !customer) {
+        throw new DomainException('VALIDATION_ERROR', 'الجزء الآجل يتطلب اختيار عميل', 422);
+      }
+
+      if (creditPortion.gt(0) && customer) {
         const balance = await this.ledger.customerBalance(tx, actor.pharmacyId, customer.id);
-        if (balance.add(total).gt(customer.creditLimit)) {
+        if (balance.add(creditPortion).gt(customer.creditLimit)) {
           const overridden = await this.verifyOverride(input.durOverride);
           if (!overridden) {
             throw new DomainException(
               'CREDIT_LIMIT_EXCEEDED',
               `تجاوز حد الائتمان للعميل ${customer.name}`,
               409,
-              [{ balance: balance.toFixed(4), creditLimit: customer.creditLimit.toFixed(4), saleTotal: total.toFixed(4) }],
+              [{ balance: balance.toFixed(4), creditLimit: customer.creditLimit.toFixed(4), saleTotal: total.toFixed(4), creditPortion: creditPortion.toFixed(4) }],
             );
           }
           await this.outbox.publish(tx, actor.pharmacyId, EVENTS.CreditLimitBreached, {
             customerId: customer.id,
             customerName: customer.name,
-            balance: balance.add(total).toFixed(4),
+            balance: balance.add(creditPortion).toFixed(4),
             creditLimit: customer.creditLimit.toFixed(4),
           });
         }
@@ -166,6 +202,7 @@ export class SalesService {
           customerId: customer?.id ?? null,
           cashierUserId: actor.userId,
           paymentMethod: input.payment.method,
+          paymentSplits: input.payment.method === 'SPLIT' ? splits.map((sp) => ({ method: sp.method, amount: sp.amount.toFixed(4) })) : undefined,
           subtotal,
           totalDiscount,
           total,
@@ -194,17 +231,17 @@ export class SalesService {
       // ── 6. Balanced journal entry — the financial fact, same transaction ──
       // Cash/AR debit (net) + Discount contra-revenue debit = Sales credit (gross);
       // COGS debit = Inventory credit (at allocated batch cost).
-      const receivableAccount = input.payment.method === 'CREDIT' ? ACCOUNTS.AR : ACCOUNTS.CASH;
+      const memoAr =
+        input.payment.method === 'SPLIT' ? `بيع مجزأ — فاتورة ${invoiceNo}`
+        : creditPortion.gt(0) ? `بيع آجل — فاتورة ${invoiceNo}`
+        : `بيع — فاتورة ${invoiceNo}`;
       const { entryId } = await this.ledger.postEntry(tx, actor, {
         sourceType: 'SALE',
         sourceId: invoice.id,
-        memo: input.payment.method === 'CREDIT' ? `بيع آجل — فاتورة ${invoiceNo}` : `بيع — فاتورة ${invoiceNo}`,
+        memo: memoAr,
         lines: [
-          {
-            account: receivableAccount,
-            debit: total,
-            customerId: input.payment.method === 'CREDIT' ? customer!.id : undefined,
-          },
+          ...(cashLikePortion.gt(0) ? [{ account: ACCOUNTS.CASH, debit: cashLikePortion }] : []),
+          ...(creditPortion.gt(0) ? [{ account: ACCOUNTS.AR, debit: creditPortion, customerId: customer!.id }] : []),
           ...(totalDiscount.gt(0) ? [{ account: ACCOUNTS.SALES_DISCOUNT, debit: totalDiscount }] : []),
           { account: ACCOUNTS.SALES, credit: subtotal },
           ...(totalCost.gt(0)
@@ -221,13 +258,13 @@ export class SalesService {
 
       // ── 7. Credit bookkeeping: cached balance + installment schedule ──
       let customerBalanceAfter: Prisma.Decimal | null = null;
-      if (input.payment.method === 'CREDIT' && customer) {
+      if (creditPortion.gt(0) && customer) {
         customerBalanceAfter = await this.ledger.customerBalance(tx, actor.pharmacyId, customer.id);
         await tx.customer.update({ where: { id: customer.id }, data: { balanceCached: customerBalanceAfter } });
         await this.outbox.publish(tx, actor.pharmacyId, EVENTS.CustomerCreditExtended, {
           customerId: customer.id,
           invoiceId: invoice.id,
-          amount: total.toFixed(4),
+          amount: creditPortion.toFixed(4),
         });
       }
 
@@ -242,6 +279,11 @@ export class SalesService {
         });
       }
 
+      if (rxOverridden) {
+        await this.audit.record(tx, actor, 'RX_OVERRIDDEN', 'SalesInvoice', invoice.id, {
+          items: rxItems.map((m) => m.tradeNameAr),
+        });
+      }
       await this.audit.record(tx, actor, 'SALE_COMPLETED', 'SalesInvoice', invoice.id, {
         invoiceNo,
         total: total.toFixed(4),

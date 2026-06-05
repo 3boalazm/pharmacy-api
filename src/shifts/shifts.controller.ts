@@ -34,6 +34,15 @@ export class ShiftsController {
 
   /** نقدية الوردية المحسوبة من الحقائق (فواتير/تحصيلات/مرتجعات) منذ الفتح. */
   private async cashSince(tx: Tx, pharmacyId: string, since: Date) {
+    // SPLIT cash portion: الجزء النقدي من الفواتير المجزأة يدخل الدرج
+    const splitInvoices = await tx.salesInvoice.findMany({
+      where: { pharmacyId, paymentMethod: 'SPLIT', createdAt: { gte: since } },
+      select: { paymentSplits: true },
+    });
+    const splitCash = splitInvoices.reduce((acc, inv) => {
+      const parts = (inv.paymentSplits as { method: string; amount: string }[] | null) ?? [];
+      return acc.add(parts.filter((x) => x.method === 'CASH').reduce((a, x) => a.add(new Prisma.Decimal(x.amount)), new Prisma.Decimal(0)));
+    }, new Prisma.Decimal(0));
     const sales = await tx.salesInvoice.aggregate({
       where: { pharmacyId, paymentMethod: "CASH", createdAt: { gte: since } },
       _sum: { total: true },
@@ -45,6 +54,14 @@ export class ShiftsController {
       JOIN accounts a ON a.id = jl."accountId"
       WHERE jl."pharmacyId" = ${pharmacyId}::uuid AND a.code = ${ACCOUNTS.CASH}
         AND je."sourceType" = 'PAYMENT' AND je."createdAt" >= ${since}`;
+    // حركات الخزينة (WF-8) تمس درج النقدية أيضًا: مصروف/إيداع تُنقص المتوقع، إيراد/سحب تزيده
+    const cashEntries = await tx.$queryRaw<{ amount: Prisma.Decimal | null }[]>`
+      SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::numeric(19,4) AS amount
+      FROM journal_lines jl
+      JOIN journal_entries je ON je.id = jl."entryId"
+      JOIN accounts a ON a.id = jl."accountId"
+      WHERE jl."pharmacyId" = ${pharmacyId}::uuid AND a.code = ${ACCOUNTS.CASH}
+        AND je."sourceType" = 'CASH_ENTRY' AND je."createdAt" >= ${since}`;
     const cashRefunds = await tx.$queryRaw<{ amount: Prisma.Decimal | null }[]>`
       SELECT COALESCE(SUM(jl.credit), 0)::numeric(19,4) AS amount
       FROM journal_lines jl
@@ -52,7 +69,7 @@ export class ShiftsController {
       JOIN accounts a ON a.id = jl."accountId"
       WHERE jl."pharmacyId" = ${pharmacyId}::uuid AND a.code = ${ACCOUNTS.CASH}
         AND je."sourceType" = 'RETURN' AND je."createdAt" >= ${since}`;
-    return d(sales._sum.total ?? 0).add(d(arCash[0]?.amount ?? 0)).sub(d(cashRefunds[0]?.amount ?? 0));
+    return d(sales._sum.total ?? 0).add(d(arCash[0]?.amount ?? 0)).sub(d(cashRefunds[0]?.amount ?? 0)).add(cashEntries[0]?.amount ?? 0).add(splitCash);
   }
 
   /** ورديتي المفتوحة + المتوقع لحظيًا. */

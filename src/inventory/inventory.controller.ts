@@ -83,4 +83,36 @@ export class InventoryController {
       return updated;
     });
   }
+
+  /** GET /movements — سجل حركات المخزون الدائم (append-only): استلام/بيع/مرتجع/تسوية/إعدام. */
+  @Get("movements")
+  @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
+  async movements(
+    @CurrentActor() actor: Actor,
+    @Query("medicineId") medicineId?: string,
+    @Query("type") type?: string,
+  ) {
+    const rows = await this.prisma.inventoryTransaction.findMany({
+      where: {
+        pharmacyId: actor.pharmacyId,
+        ...(medicineId && { medicineId }),
+        ...(type && { type: type as never }),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+    const medIds = [...new Set(rows.map((r) => r.medicineId))];
+    const batchIds = [...new Set(rows.map((r) => r.batchId))];
+    const [meds, batches] = await Promise.all([
+      this.prisma.medicine.findMany({ where: { id: { in: medIds } }, select: { id: true, tradeNameAr: true, form: true } }),
+      this.prisma.batch.findMany({ where: { id: { in: batchIds } }, select: { id: true, batchNumber: true } }),
+    ]);
+    const medMap = new Map(meds.map((m) => [m.id, m]));
+    const batchMap = new Map(batches.map((b) => [b.id, b.batchNumber]));
+    return rows.map((r) => ({
+      id: r.id, type: r.type, quantity: r.quantity, unitCost: r.unitCost,
+      referenceType: r.referenceType, createdAt: r.createdAt,
+      medicine: medMap.get(r.medicineId) ?? null, batchNumber: batchMap.get(r.batchId) ?? null,
+    }));
+  }
 }

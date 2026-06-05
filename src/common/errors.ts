@@ -6,7 +6,8 @@ export class DomainException extends HttpException {
     public readonly code:
       | "VALIDATION_ERROR" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "CONFLICT"
       | "INSUFFICIENT_STOCK" | "EXPIRED_BATCH_BLOCKED" | "PERIOD_CLOSED"
-      | "CREDIT_LIMIT_EXCEEDED" | "DUR_BLOCK" | "IDEMPOTENT_IN_PROGRESS" | "RATE_LIMITED",
+      | "CREDIT_LIMIT_EXCEEDED" | "DUR_BLOCK"
+  | "RX_REQUIRED" | "IDEMPOTENT_IN_PROGRESS" | "RATE_LIMITED",
     message: string,
     status: HttpStatus = HttpStatus.CONFLICT,
     public readonly details?: unknown[],

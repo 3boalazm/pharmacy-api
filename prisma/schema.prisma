@@ -47,6 +47,7 @@ model User {
   @@index([pharmacyId])
   @@map("users")
   shifts Shift[]
+  cashEntries CashEntry[]
 }
 
 // ───────────────────────── Catalog (descriptive only — no quantities) ─────────────────────────
@@ -177,6 +178,7 @@ model SalesInvoice {
   customerId     String?       @db.Uuid
   cashierUserId  String        @db.Uuid
   paymentMethod  PaymentMethod
+  paymentSplits  Json? // [{method, amount}] عند الدفع المجزأ
   subtotal       Decimal       @db.Decimal(19, 4)
   totalDiscount  Decimal       @db.Decimal(19, 4)
   total          Decimal       @db.Decimal(19, 4)
@@ -275,6 +277,7 @@ model Installment {
   seq        Int
   amount     Decimal   @db.Decimal(19, 4)
   dueDate    DateTime  @db.Date
+  paidAmount Decimal   @db.Decimal(19, 4) @default(0) // سداد جزئي مرئي ومتراكم
   paidAt     DateTime?
 
   @@index([pharmacyId, customerId, dueDate])
@@ -476,4 +479,39 @@ model Shift {
   @@index([pharmacyId, status])
   @@index([pharmacyId, userId, openedAt])
   @@map("shifts")
+}
+
+// ───────────────────────── Cashbox (الخزينة) — Sprint 2 / ISS-010 ─────────────────────────
+
+model CashCategory {
+  id         String      @id @default(uuid()) @db.Uuid
+  pharmacyId String      @db.Uuid
+  name       String
+  kind       String // EXPENSE | INCOME
+  archivedAt DateTime?
+  entries    CashEntry[]
+
+  @@unique([pharmacyId, name])
+  @@map("cash_categories")
+}
+
+model CashEntry {
+  id             String        @id @default(uuid()) @db.Uuid
+  pharmacyId     String        @db.Uuid
+  type           String // EXPENSE | INCOME | DEPOSIT | WITHDRAW
+  amount         Decimal       @db.Decimal(19, 4)
+  memo           String
+  categoryId     String?       @db.Uuid
+  category       CashCategory? @relation(fields: [categoryId], references: [id])
+  shiftId        String?       @db.Uuid // null = خارج وردية
+  journalEntryId String        @db.Uuid
+  createdById    String        @db.Uuid
+  createdBy      User          @relation(fields: [createdById], references: [id])
+  reversesId     String?       @db.Uuid // هذا القيد عكسٌ لذاك
+  reversedById   String?       @db.Uuid // عُكس بهذا القيد (يقفل الصف)
+  createdAt      DateTime      @default(now())
+
+  @@index([pharmacyId, createdAt])
+  @@index([pharmacyId, type, createdAt])
+  @@map("cash_entries")
 }

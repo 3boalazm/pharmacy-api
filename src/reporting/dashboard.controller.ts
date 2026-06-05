@@ -17,12 +17,20 @@ export class DashboardController {
     const cached = await this.cache.get<Record<string, string>>(cacheKey);
     if (cached) return cached;
     const today = new Date(); today.setHours(0, 0, 0, 0);
+    const yesterday = new Date(today.getTime() - 86_400_000);
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
-    const [todayAgg, monthAgg, receivables] = await Promise.all([
+    const [todayAgg, yesterdayAgg, pendingOrders, monthAgg, receivables] = await Promise.all([
       this.prisma.salesInvoice.aggregate({
         where: { pharmacyId: actor.pharmacyId, createdAt: { gte: today } },
         _sum: { total: true },
+      }),
+      this.prisma.salesInvoice.aggregate({
+        where: { pharmacyId: actor.pharmacyId, createdAt: { gte: yesterday, lt: today } },
+        _sum: { total: true },
+      }),
+      this.prisma.onlineOrder.count({
+        where: { pharmacyId: actor.pharmacyId, status: { in: ["PENDING", "ACCEPTED", "PREPARING", "READY"] } },
       }),
       this.prisma.salesInvoice.aggregate({
         where: { pharmacyId: actor.pharmacyId, createdAt: { gte: monthStart } },
@@ -53,6 +61,9 @@ export class DashboardController {
       totalReceivables: receivables._sum.balanceCached ?? zero,
       overduePayments: overdue._sum.amount ?? zero,
       profitMtd: sales.sub(cost),
+      yesterdaySales: yesterdayAgg._sum.total ?? zero,
+      salesMtd: sales,
+      pendingOrders,
     };
     await this.cache.set(cacheKey, {
       todaySales: result.todaySales.toFixed(4),
@@ -60,6 +71,9 @@ export class DashboardController {
       totalReceivables: result.totalReceivables.toFixed(4),
       overduePayments: result.overduePayments.toFixed(4),
       profitMtd: result.profitMtd.toFixed(4),
+      yesterdaySales: result.yesterdaySales.toFixed(4),
+      salesMtd: result.salesMtd.toFixed(4),
+      pendingOrders: String(result.pendingOrders),
     }, 30);
     return result;
   }
