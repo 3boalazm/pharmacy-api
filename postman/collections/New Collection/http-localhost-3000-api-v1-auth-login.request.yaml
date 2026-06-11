@@ -1,0 +1,16 @@
+$kind: http-request
+name: http://localhost:3000/api/v1/auth/login
+url: http://localhost:3000/api/v1/auth/login
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"phone\": \"01000391583\",\r
+
+    \  \"password\": \"246813579\",\r
+
+    \  \"deviceId\": \"test-device-123\"\r
+
+    }"
+order: 1781203260379
