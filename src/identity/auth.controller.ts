@@ -59,8 +59,16 @@ export class AuthController {
   @Post("pin-elevate")
   @Roles("PHARMACIST")
   async pinElevate(@CurrentActor() actor: Actor, @Body() dto: PinDto) {
+    // H2: حد محاولات — الـ PIN مفتاح أخطر تجاوزات النظام (DUR/ائتمان/روشتة)
+    const attempts = (await this.cache.incrWithTtl(`ratelimit:pin:${actor.userId}`, 300)) ?? 0;
+    if (attempts > 5) {
+      throw new DomainException("RATE_LIMITED", "محاولات كثيرة — انتظر 5 دقائق", 429);
+    }
     const user = await this.prisma.user.findFirst({ where: { id: actor.userId, pharmacyId: actor.pharmacyId } });
     if (!user?.pinHash || !(await bcrypt.compare(dto.pin, user.pinHash))) {
+      if (attempts >= 3) {
+        await this.audit.record(this.prisma, { userId: actor.userId, pharmacyId: actor.pharmacyId, role: actor.role }, "PIN_ELEVATE_FAILED", "User", actor.userId, { attempts });
+      }
       throw new DomainException("UNAUTHORIZED", "رمز الصيدلي غير صحيح", 401);
     }
     // R-1: jti registered in Redis as single-use; sales consume it atomically (Plan §0).

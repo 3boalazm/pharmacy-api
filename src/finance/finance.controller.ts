@@ -270,4 +270,45 @@ export class FinanceController {
     );
     return { rows, totals };
   }
+
+  /** GET /finance/journal — تصفح دفتر الأستاذ: قراءة فقط، فلاتر فترة/مصدر/حساب، ترقيم 50 (ISS US-4.2.3). */
+  @Get("journal")
+  @Roles("PHARMACIST")
+  async journalBrowse(
+    @CurrentActor() actor: Actor,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("sourceType") sourceType?: string,
+    @Query("accountCode") accountCode?: string,
+    @Query("skip") skip = "0",
+  ) {
+    const accountIds = accountCode
+      ? (await this.prisma.account.findMany({ where: { pharmacyId: actor.pharmacyId, code: accountCode }, select: { id: true } })).map((a) => a.id)
+      : null;
+    const where: Prisma.JournalEntryWhereInput = {
+      pharmacyId: actor.pharmacyId,
+      ...(sourceType && { sourceType }),
+      ...(from || to
+        ? { createdAt: { ...(from && { gte: new Date(`${from}T00:00:00`) }), ...(to && { lte: new Date(`${to}T23:59:59.999`) }) } }
+        : {}),
+      ...(accountIds && { lines: { some: { accountId: { in: accountIds } } } }),
+    };
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.journalEntry.findMany({
+        where,
+        select: { id: true, memo: true, sourceType: true, createdAt: true, lines: { select: { debit: true } } },
+        orderBy: { createdAt: "desc" },
+        skip: Math.max(Number(skip) || 0, 0),
+        take: 50,
+      }),
+      this.prisma.journalEntry.count({ where }),
+    ]);
+    return {
+      rows: rows.map((r) => ({
+        id: r.id, memo: r.memo, sourceType: r.sourceType, createdAt: r.createdAt,
+        amount: r.lines.reduce((a, l) => a.add(l.debit), new Prisma.Decimal(0)),
+      })),
+      total,
+    };
+  }
 }

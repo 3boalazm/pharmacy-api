@@ -178,7 +178,8 @@ model SalesInvoice {
   customerId     String?       @db.Uuid
   cashierUserId  String        @db.Uuid
   paymentMethod  PaymentMethod
-  paymentSplits  Json? // [{method, amount}] عند الدفع المجزأ
+  paymentSplits  Json?
+  prescriptionId String? @db.Uuid // أثر الروشتة على الفاتورة // [{method, amount}] عند الدفع المجزأ
   subtotal       Decimal       @db.Decimal(19, 4)
   totalDiscount  Decimal       @db.Decimal(19, 4)
   total          Decimal       @db.Decimal(19, 4)
@@ -514,4 +515,36 @@ model CashEntry {
   @@index([pharmacyId, createdAt])
   @@index([pharmacyId, type, createdAt])
   @@map("cash_entries")
+}
+
+// ───────────────────────── الروشتات v1 — يدوي أولًا، جاهز للـ OCR (EP-08) ─────────────────────────
+
+model Prescription {
+  id           String             @id @default(uuid()) @db.Uuid
+  pharmacyId   String             @db.Uuid
+  customerId   String?            @db.Uuid
+  doctorName   String?
+  notes        String? // نص حر — وعند تفعيل OCR لاحقًا يُملأ آليًا ويُراجع
+  status       String             @default("READY") // READY | DISPENSED | CANCELLED
+  invoiceId    String?            @db.Uuid // فاتورة الصرف بعد التحويل للسلة
+  createdById  String             @db.Uuid
+  createdAt    DateTime           @default(now())
+  lines        PrescriptionLine[]
+
+  @@index([pharmacyId, status, createdAt])
+  @@index([pharmacyId, customerId])
+  @@map("prescriptions")
+}
+
+model PrescriptionLine {
+  id             String       @id @default(uuid()) @db.Uuid
+  prescriptionId String       @db.Uuid
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  pharmacyId     String       @db.Uuid
+  medicineId     String       @db.Uuid
+  quantity       Int
+  note           String?
+
+  @@index([prescriptionId])
+  @@map("prescription_lines")
 }

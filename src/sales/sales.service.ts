@@ -67,6 +67,14 @@ export class SalesService {
         where: { id: { in: input.lines.map((l) => l.medicineId) }, pharmacyId: actor.pharmacyId, requiresPrescription: true },
         select: { id: true, tradeNameAr: true },
       });
+      if (input.prescriptionId) {
+        const rx = await tx.prescription.findFirst({
+          where: { id: input.prescriptionId, pharmacyId: actor.pharmacyId },
+          select: { id: true, status: true },
+        });
+        if (!rx) throw new DomainException('NOT_FOUND', 'الروشتة غير موجودة', 404);
+        if (rx.status !== 'READY') throw new DomainException('CONFLICT', 'الروشتة مصروفة أو ملغاة بالفعل', 409);
+      }
       if (rxItems.length > 0 && !input.prescriptionId) {
         rxOverridden = await this.verifyOverride(input.durOverride);
         if (!rxOverridden) {
@@ -202,6 +210,7 @@ export class SalesService {
           customerId: customer?.id ?? null,
           cashierUserId: actor.userId,
           paymentMethod: input.payment.method,
+          prescriptionId: input.prescriptionId ?? undefined,
           paymentSplits: input.payment.method === 'SPLIT' ? splits.map((sp) => ({ method: sp.method, amount: sp.amount.toFixed(4) })) : undefined,
           subtotal,
           totalDiscount,
@@ -282,6 +291,12 @@ export class SalesService {
       if (rxOverridden) {
         await this.audit.record(tx, actor, 'RX_OVERRIDDEN', 'SalesInvoice', invoice.id, {
           items: rxItems.map((m) => m.tradeNameAr),
+        });
+      }
+      if (input.prescriptionId) {
+        await tx.prescription.update({
+          where: { id: input.prescriptionId },
+          data: { status: 'DISPENSED', invoiceId: invoice.id },
         });
       }
       await this.audit.record(tx, actor, 'SALE_COMPLETED', 'SalesInvoice', invoice.id, {

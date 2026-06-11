@@ -15,6 +15,7 @@ import { ReportingModule } from "./reporting/reporting.module";
 import { ProcurementModule } from "./procurement/procurement.module";
 import { ShopModule } from "./shop/shop.module";
 import { ShiftsModule } from "./shifts/shifts.module";
+import { PrescriptionsModule } from "./prescriptions/prescriptions.module";
 import { AuthGuard } from "./common/auth";
 import { ApiExceptionFilter, EnvelopeInterceptor } from "./common/http.shape";
 import { RequestContextMiddleware } from "./common/middleware/request-context.middleware";
@@ -39,6 +40,7 @@ import { RequestContextMiddleware } from "./common/middleware/request-context.mi
     ProcurementModule,
     ShopModule,
     ShiftsModule,
+    PrescriptionsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },

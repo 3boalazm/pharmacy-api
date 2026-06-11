@@ -115,4 +115,36 @@ export class InventoryController {
       medicine: medMap.get(r.medicineId) ?? null, batchNumber: batchMap.get(r.batchId) ?? null,
     }));
   }
+
+  /** GET /reorder-suggestions — قائمة شراء مقترحة: تحت حد الأمان + سرعة بيع 28 يومًا لتغطية 14 يومًا. */
+  @Get("reorder-suggestions")
+  @Roles("ASSISTANT", "PHARMACIST")
+  async reorderSuggestions(@CurrentActor() actor: Actor) {
+    const rows = await this.prisma.$queryRaw<
+      { id: string; name: string; stock: number; minLevel: number; sold28: number }[]
+    >`
+      SELECT m.id, m."tradeNameAr" AS name, m."minStockLevel" AS "minLevel",
+             COALESCE(SUM(b."quantityOnHand") FILTER (WHERE b.status = 'ACTIVE' AND b."expiryDate" > now()), 0)::int AS stock,
+             COALESCE((SELECT SUM(si.quantity)::int FROM sales_items si
+                       JOIN sales_invoices inv ON inv.id = si."invoiceId"
+                       WHERE si."medicineId" = m.id AND inv."createdAt" > now() - interval '28 days'), 0) AS sold28
+      FROM medicines m
+      LEFT JOIN batches b ON b."medicineId" = m.id
+      WHERE m."pharmacyId" = ${actor.pharmacyId}::uuid AND m."archivedAt" IS NULL
+      GROUP BY m.id
+      HAVING COALESCE(SUM(b."quantityOnHand") FILTER (WHERE b.status = 'ACTIVE' AND b."expiryDate" > now()), 0)
+             <= GREATEST(m."minStockLevel", 0)
+         OR (COALESCE((SELECT SUM(si.quantity) FROM sales_items si
+                       JOIN sales_invoices inv ON inv.id = si."invoiceId"
+                       WHERE si."medicineId" = m.id AND inv."createdAt" > now() - interval '28 days'), 0) / 28.0 * 7)
+            > COALESCE(SUM(b."quantityOnHand") FILTER (WHERE b.status = 'ACTIVE' AND b."expiryDate" > now()), 0)
+      ORDER BY stock ASC
+      LIMIT 100`;
+    return rows.map((r) => {
+      const dailyVelocity = r.sold28 / 28;
+      const daysLeft = dailyVelocity > 0 ? Math.floor(r.stock / dailyVelocity) : null;
+      const suggested = Math.max(Math.ceil(dailyVelocity * 14) - r.stock, r.minLevel > 0 ? r.minLevel * 2 - r.stock : 0, 0);
+      return { ...r, dailyVelocity: dailyVelocity.toFixed(2), daysLeft, suggestedQty: suggested };
+    }).filter((r) => r.suggestedQty > 0);
+  }
 }

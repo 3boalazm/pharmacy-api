@@ -4,6 +4,7 @@ ALTER TABLE cash_entries    ENABLE ROW LEVEL SECURITY;
 DO $$ DECLARE t text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['cash_categories','cash_entries'] LOOP
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_%s ON %s', t, t);
     EXECUTE format('CREATE POLICY tenant_isolation_%s ON %s USING ("pharmacyId" = current_setting(''app.pharmacy_id'', true)::uuid)', t, t);
   END LOOP;
 END $$;
