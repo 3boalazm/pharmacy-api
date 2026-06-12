@@ -38,7 +38,7 @@ class CreateMedicineDto {
 export class MedicinesController {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
-  /** GET /medicines?search=&include=stock — POS instant search (Contract §3). */
+  /** GET /medicines?search=&include=stock&sort=&stockStatus= — بحث + ترتيب + فلتر حالة المخزون (قراءة فقط). */
   @Get()
   @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
   async search(
@@ -46,7 +46,17 @@ export class MedicinesController {
     @Query("search") search = "",
     @Query("include") include?: string,
     @Query("limit") limit = "12",
+    @Query("sort") sort?: string,
+    @Query("stockStatus") stockStatus?: string,
   ) {
+    // الترتيب المسموح فقط (قائمة بيضاء — لا حقن)
+    const orderBy: Prisma.MedicineOrderByWithRelationInput =
+      sort === "name-desc" ? { tradeNameAr: "desc" }
+      : sort === "price-asc" ? { sellPrice: "asc" }
+      : sort === "price-desc" ? { sellPrice: "desc" }
+      : sort === "newest" ? { createdAt: "desc" }
+      : { tradeNameAr: "asc" };
+
     const meds = await this.prisma.medicine.findMany({
       where: {
         pharmacyId: actor.pharmacyId,
@@ -60,7 +70,7 @@ export class MedicinesController {
         ],
       },
       take: Math.min(Number(limit) || 12, 100),
-      orderBy: { tradeNameAr: "asc" },
+      orderBy,
     });
 
     if (include !== "stock" || meds.length === 0) return meds;
@@ -73,21 +83,58 @@ export class MedicinesController {
       _min: { expiryDate: true },
     });
     const byMed = new Map(stock.map((s) => [s.medicineId, s]));
-    return meds.map((m) => ({
+    const enriched = meds.map((m) => ({
       ...m,
       stock: {
         onHand: byMed.get(m.id)?._sum.quantityOnHand ?? 0,
         nearestExpiry: byMed.get(m.id)?._min.expiryDate ?? null,
       },
     }));
+
+    // فلتر حالة المخزون (بعد إثراء المخزون — قراءة فقط، لا يمسّ قواعد المخزون)
+    if (stockStatus === "out") return enriched.filter((m) => m.stock.onHand <= 0);
+    if (stockStatus === "low") return enriched.filter((m) => m.stock.onHand > 0 && m.stock.onHand <= m.minStockLevel);
+    if (stockStatus === "in") return enriched.filter((m) => m.stock.onHand > 0);
+    return enriched;
+  }
+
+  /** GET /medicines/by-barcode/:code — بحث مباشر بالباركود (أو الكود الداخلي) لمسار المسح الفوري.
+   *  يرجّع صنفًا واحدًا بمخزونه، أو 404 — دون الاعتماد على نتائج بحث مؤجلة (يتفادى سباق القارئ السريع). */
+  @Get("by-barcode/:code")
+  @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
+  async byBarcode(@CurrentActor() actor: Actor, @Param("code") code: string) {
+    const value = code.trim();
+    const med = await this.prisma.medicine.findFirst({
+      where: {
+        pharmacyId: actor.pharmacyId,
+        archivedAt: null,
+        OR: [{ barcode: value }, { internalCode: value }],
+      },
+    });
+    if (!med) throw new DomainException("NOT_FOUND", "لا صنف بهذا الباركود", 404);
+    const stock = await this.prisma.batch.aggregate({
+      where: { pharmacyId: actor.pharmacyId, medicineId: med.id, status: "ACTIVE", expiryDate: { gt: new Date() } },
+      _sum: { quantityOnHand: true },
+      _min: { expiryDate: true },
+    });
+    return {
+      ...med,
+      stock: { onHand: stock._sum.quantityOnHand ?? 0, nearestExpiry: stock._min.expiryDate ?? null },
+    };
   }
 
   @Get(":id")
   @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
-  async detail(@CurrentActor() actor: Actor, @Param("id") id: string) {
+  async detail(@CurrentActor() actor: Actor, @Param("id") id: string, @Query("include") include?: string) {
     const med = await this.prisma.medicine.findFirst({ where: { id, pharmacyId: actor.pharmacyId } });
     if (!med) throw new DomainException("NOT_FOUND", "Medicine not found", 404);
-    return med;
+    if (include !== "stock") return med;
+    const stock = await this.prisma.batch.aggregate({
+      where: { pharmacyId: actor.pharmacyId, medicineId: med.id, status: "ACTIVE", expiryDate: { gt: new Date() } },
+      _sum: { quantityOnHand: true },
+      _min: { expiryDate: true },
+    });
+    return { ...med, stock: { onHand: stock._sum.quantityOnHand ?? 0, nearestExpiry: stock._min.expiryDate ?? null } };
   }
 
   @Post()

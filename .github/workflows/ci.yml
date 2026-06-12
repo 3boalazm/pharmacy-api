@@ -1,0 +1,65 @@
+name: CI
+
+# يمنع وصول أي كود لا يبني إلى الإنتاج — يُشغّل على كل دفعة وكل PR
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: pharmacy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/pharmacy_test
+      JWT_SECRET: test-secret-ci-only
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Build
+        run: npx tsc -p tsconfig.json
+
+      - name: Verify start path exists
+        run: test -f dist/src/main.js && echo "✔ dist/src/main.js (matches start script)"
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Apply schema + RLS to test DB
+        run: |
+          npx prisma db push --skip-generate --accept-data-loss
+          psql "$DATABASE_URL" -f prisma/sql/007_rls_complete.sql
+
+      - name: Financial + tenant-isolation tests (real Postgres + RLS)
+        run: npm run test:ci

@@ -51,6 +51,25 @@ export class SalesController {
     return this.invoices.list(actor.pharmacyId, customerId);
   }
 
+  @Get("last-for-customer/:customerId")
+  @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
+  async lastForCustomer(@CurrentActor() actor: Actor, @Param("customerId") customerId: string) {
+    const list = await this.invoices.list(actor.pharmacyId, customerId);
+    if (!list.length) throw new DomainException("NOT_FOUND", "لا فواتير سابقة لهذا العميل", 404);
+    const invoice = await this.invoices.findWithLines(actor.pharmacyId, list[0].id);
+    if (!invoice) throw new DomainException("NOT_FOUND", "تعذّر قراءة الفاتورة", 404);
+    return {
+      invoiceNo: invoice.invoiceNo,
+      createdAt: invoice.createdAt,
+      lines: invoice.lines.map((l) => ({
+        medicineId: l.medicineId,
+        nameAr: l.medicine.tradeNameAr,
+        quantity: l.quantity,
+        unitPrice: l.unitPrice,
+      })),
+    };
+  }
+
   @Get(":id")
   @Roles("CASHIER", "ASSISTANT", "PHARMACIST")
   async detail(@CurrentActor() actor: Actor, @Param("id") id: string) {
